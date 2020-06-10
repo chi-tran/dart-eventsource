@@ -9,8 +9,11 @@ typedef RetryIndicator = void Function(Duration retry);
 
 class EventSourceDecoder implements StreamTransformer<List<int>, Event> {
   RetryIndicator retryIndicator;
+  Future Function(dynamic e) retryError;
 
-  EventSourceDecoder({this.retryIndicator});
+
+  EventSourceDecoder({this.retryIndicator, this.retryError});
+  
 
   Stream<Event> bind(Stream<List<int>> stream) {
     StreamController<Event> controller;
@@ -24,6 +27,7 @@ class EventSourceDecoder implements StreamTransformer<List<int>, Event> {
       // single event. So we build events on the fly and broadcast the event as
       // soon as we encounter a double newline, then we start a new one.
       stream
+      .handleError(retryError)
           .transform(new Utf8Decoder())
           .transform(new LineSplitter())
           .listen((String line) {

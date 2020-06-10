@@ -11,6 +11,7 @@ import "package:http_parser/http_parser.dart" show MediaType;
 
 import "src/event.dart";
 import "src/decoder.dart";
+import "dart:io";
 
 enum EventSourceReadyState {
   CONNECTING,
@@ -57,6 +58,25 @@ class EventSource extends Stream<Event> {
   String _method;
 
 
+  Future _retryError(dynamic e) async {
+    // print ('ERROR RETRYING CONNECTION');
+    _readyState = EventSourceReadyState.CONNECTING;
+    // try reopening with exponential backoff
+    Duration backoff = _retryDelay;
+    while (true) {
+      // print ('RETYING NOW.....$backoff');
+      await new Future.delayed(backoff);
+      try {
+        // print ('RETYING NOW.....before start');
+        await _start();
+        break;
+      } catch (error) {
+        // print ('RETYING NOW....error');
+        _streamController.addError(error);
+        backoff *= 2;
+      }
+    }
+  }
   /// Create a new EventSource by connecting to the specified url.
   static Future<EventSource> connect(url,
       {http.Client client, String lastEventId, Map headers, String body, String method}) async {
@@ -66,13 +86,15 @@ class EventSource extends Stream<Event> {
     lastEventId = lastEventId ?? "";
     body = body ?? "";
     method = method ?? "GET";
+    // print ('CONNECTING CONNECT');
     EventSource es = new EventSource._internal(url, client, lastEventId, headers, body, method);
     await es._start();
     return es;
   }
 
   EventSource._internal(this.url, this.client, this._lastEventId, this.headers, this._body, this._method) {
-    _decoder = new EventSourceDecoder(retryIndicator: _updateRetryDelay);
+    _decoder = new EventSourceDecoder(retryIndicator: _updateRetryDelay, retryError: _retryError );
+    
   }
 
   // proxy the listen call to the controller's listen call
@@ -80,7 +102,7 @@ class EventSource extends Stream<Event> {
   StreamSubscription<Event> listen(void onData(Event event),
           {Function onError, void onDone(), bool cancelOnError}) =>
       _streamController.stream.listen(onData,
-          onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+          onError: (error)=> print('controller fixed error'), onDone: onDone, cancelOnError: cancelOnError);
 
   /// Attempt to start a new connection.
   Future _start() async {
@@ -88,7 +110,8 @@ class EventSource extends Stream<Event> {
     var request = new http.Request(_method, url);
     request.headers["Cache-Control"] = "no-cache";
     request.headers["Accept"] = "text/event-stream";
-    if (_lastEventId.isNotEmpty) {
+    // print ('new header');
+    if (_lastEventId?.isNotEmpty ?? false) {
       request.headers["Last-Event-ID"] = _lastEventId;
     }
     if (headers != null) {
@@ -98,22 +121,29 @@ class EventSource extends Stream<Event> {
     }
     request.body = _body;
 
+
     var response = await client.send(request);
+
     if (response.statusCode != 200) {
       // server returned an error
+      // print('RESPONSE CODE !200');
       var bodyBytes = await response.stream.toBytes();
       String body = _encodingForHeaders(response.headers).decode(bodyBytes);
       throw new EventSourceSubscriptionException(response.statusCode, body);
     }
     _readyState = EventSourceReadyState.OPEN;
     // start streaming the data
-    response.stream.transform(_decoder).listen((Event event) {
-      _streamController.add(event);
-      _lastEventId = event.id;
-    },
-        cancelOnError: true,
-        onError: _retry,
-        onDone: () => _readyState = EventSourceReadyState.CLOSED);
+
+      var subscription = response.stream.transform(_decoder).listen((Event event) {
+        _streamController.add(event);
+        _lastEventId = event.id;
+      },
+          cancelOnError: true,
+    onError: _retry,
+    onDone: () => _readyState = EventSourceReadyState.CLOSED);
+
+//    subscription.onData((data) {print('ddata received');});
+//    subscription.onError((err) => print ('lets do this right'));
   }
 
   /// Retries until a new connection is established. Uses exponential backoff.
